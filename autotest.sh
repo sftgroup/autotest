@@ -1,5 +1,5 @@
 #!/bin/bash
-# autotest v1.6 — AutoOps 通用自动化测试引擎
+# autotest v2.0 — AutoOps 通用自动化测试引擎
 # 
 # 用法:
 #   autotest run --project <path> [--scope ct|at|ft|all]
@@ -185,10 +185,10 @@ CHAIN_RPC["polygon"]="${POLYGON_RPC:-}"
 # 从 ## chains 声明段解析当前 CT 文件的链配置
 parse_chain_config() {
     local file="$1"
-    awk '/^## chains/{f=1; next} /^## (contracts|tokens|scenarios)/{f=0; exit} f && /^\|/' "$file" 2>/dev/null |         grep -v -- '------' | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); if($2!~/链名|名称/) printf "%s|%s\n",$2,$3}'
+    awk '/^## chains/{f=1; next} /^## (contracts|tokens|scenarios|declarations)/{f=0; exit} f && /^\|/' "$file" 2>/dev/null |         grep -v -- '------' | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$4); if($2!~/链名|名称/) printf "%s|%s|%s\n",$2,$3,$4}'
 }
 
-# 获取当前场景文件的 RPC
+# 获取当前场景文件的 RPC (v2.0 扩展从 ## chains 读 gas_price_gwei)
 get_chain_rpc() {
     local file="$1"
     local chain_name; chain_name=$(parse_chain_config "$file" | head -1 | cut -d'|' -f1)
@@ -199,6 +199,15 @@ get_chain_rpc() {
     [ -z "$rpc" ] && rpc="${CHAIN_RPC[$chain_name]:-}"
     [ -z "$rpc" ] && rpc="${SEPOLIA_RPC:-}"
     echo "$rpc"
+}
+
+# 从 ## chains 表读 gas_price_gwei (v2.0 新增)
+get_chain_gas_price() {
+    local file="$1"
+    local chain_name; chain_name=$(parse_chain_config "$file" | head -1 | cut -d'|' -f1)
+    [ -z "$chain_name" ] && chain_name="sepolia"
+    local g; g=$(parse_chain_config "$file" | grep "^${chain_name}|" | head -1 | cut -d'|' -f3)
+    [ -n "$g" ] && [ "$g" != " " ] && echo "$g"
 }
 
 # ── 链上 ──────────────────────────────────────
@@ -324,6 +333,27 @@ parse_tokens() {
     # 解析 ## tokens 段
     awk '/^## tokens/{f=1; next} /^## scenarios/{f=0; exit} f && /^\|/' "$file" 2>/dev/null | \
         grep -v -- '------' | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$4); if($2!~/别名/) printf "%s|%s|%s\n",$2,$3,$4}'
+}
+
+# ── 环境声明解析 (v2.0) ────────────────────────
+parse_declarations_env() {
+    local file="$1"
+    awk '/^## declarations/{f=1; next} /^## (contracts|tokens|scenarios|chains)/{f=0; exit} f && /^\|/' "$file" 2>/dev/null | \
+        grep -v -- '------' | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$3); if($2!~/键/) printf "%s|%s\n",$2,$3}'
+}
+
+expand_vars() {
+    # 展开 ${FRONTEND} ${RELAY_API} 等模板变量
+    local text="$1" file="$2"
+    local frontend relay_api
+    frontend=$(parse_declarations_env "$file" | grep '^frontend|' | cut -d'|' -f2)
+    relay_api=$(parse_declarations_env "$file" | grep '^relay_api|' | cut -d'|' -f2)
+    [ -z "$frontend" ] && frontend="${FRONTEND:-${FRONTEND_URL:-}}"
+    [ -z "$relay_api" ] && relay_api="$frontend/api"
+    local result="$text"
+    result="${result//\$\{FRONTEND\}/$frontend}"
+    result="${result//\$\{RELAY_API\}/$relay_api}"
+    echo "$result"
 }
 
 # 查声明表：get_contract "Router" → 0xF...  get_token_decimals "USDC" → 6
@@ -566,6 +596,9 @@ EOF
 
         if [ -f "$ct" ]; then
             AT_CT_FILE="$ct"  # 供 parse_declarations/parse_tokens 查找合约代币声明
+            # 从 ## chains 表自动读取 gas_price (v2.0)
+            local ct_gas; ct_gas=$(get_chain_gas_price "$ct")
+            [ -n "$ct_gas" ] && GAS_PRICE_GWEI="${GAS_PRICE_GWEI:-$ct_gas}"
             # 多链 RPC 解析 (v1.3)
             local ct_rpc; ct_rpc=$(get_chain_rpc "$ct")
             [ -n "$ct_rpc" ] && RPC="$ct_rpc"
@@ -629,7 +662,14 @@ EOF
                         [ -n "$name" ] && [ -n "$addr" ] && resolved_op=$(echo "$resolved_op" | sed "s/\b${name}\b/${addr}/g")
                     done <<< "$(parse_declarations "$AT_CT_FILE")"
                     actual=$(cast call $(echo "$resolved_op" | sed 's/^cast call //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" 2>&1 | head -1)
-                    if echo "$expected" | grep -qiE '^> 0'; then
+                    # 条件断言 (v2.0)
+                    if echo "$expected" | grep -qE '^>=\s*[0-9]+'; then
+                        local just_num threshold; threshold=$(echo "$expected" | grep -o '[0-9]\+'); just_num=$(echo "$actual" | grep -oE '[0-9]+' | head -1)
+                        [ -n "$just_num" ] && [ "$just_num" -ge "$threshold" ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    elif echo "$expected" | grep -qE '^<=\s*[0-9]+'; then
+                        local just_num threshold; threshold=$(echo "$expected" | grep -o '[0-9]\+'); just_num=$(echo "$actual" | grep -oE '[0-9]+' | head -1)
+                        [ -n "$just_num" ] && [ "$just_num" -le "$threshold" ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    elif echo "$expected" | grep -qiE '^>\s*0'; then
                         local just_num; just_num=$(echo "$actual" | grep -oE '[0-9]+' | head -1)
                         [ -n "$just_num" ] && [ "$just_num" != "0" ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
                     else
@@ -683,8 +723,9 @@ EOF
                 [ -z "$id" ] && continue
                 (echo "$id" | grep -qE '^(CT-ID|AT-ID|FT-ID)$') && continue
                 id=$(echo "$id" | xargs)
-                # Clean: strip backticks, then detect if endpoint contains a curl command
+                # Clean + expand ${FRONTEND} template (v2.0)
                 endpoint_clean=$(echo "$endpoint" | tr -d '\140' | xargs)
+                endpoint_clean=$(expand_vars "$endpoint_clean" "$at")
                 method_clean=$(echo "$method" | xargs)
                 expected_clean=$(echo "$expected_code" | xargs)
                 local actual_code="" result=""
@@ -737,13 +778,45 @@ EOF
                 [ -z "$id" ] && continue
                 (echo "$id" | grep -qE '^(CT-ID|AT-ID|FT-ID)$') && continue
                 id=$(echo "$id" | xargs); page=$(echo "$page" | xargs)
-                # Clean action: strip backticks
+                # Clean + expand ${FRONTEND} (v2.0)
                 action_clean=$(echo "$action" | tr -d '\140' | xargs)
+                action_clean=$(expand_vars "$action_clean" "$ft")
                 expected_clean=$(echo "$expected" | xargs)
                 local url="${f_url}${page}" result="" actual=""
 
-                # curl command detection (before browser checks)
-                if echo "$action_clean" | grep -qi '^curl '; then
+                # browser 命令 (v2.0) → 用 page 列作为 URL 路径
+                if echo "$action_clean" | grep -qiE '^browser '; then
+                    local bcmd bpath
+                    bcmd=$(echo "$action_clean" | sed 's/^browser //')
+                    bpath=$(echo "$bcmd" | awk '{print $NF}')  # last token = URL path
+                    local target_url="${f_url}${bpath}"
+                    case "$bcmd" in
+                        snapshot*)
+                            agent-browser open "$target_url" 2>/dev/null; sleep 2
+                            local snap snap=$(agent-browser snapshot -i --json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=d.get('data',{}).get('snapshot','')
+print(s[:500])" 2>/dev/null)
+                            [ -n "$snap" ] && echo "$snap" | grep -qi "$expected_clean" && result="✅" pass=$((pass+1)) actual="含 '$expected_clean'" || { result="❌" fail=$((fail+1)); actual="快照不含 '$expected_clean'"; }
+                            ;;
+                        navigate*)
+                            agent-browser open "$target_url" 2>/dev/null
+                            result="✅" pass=$((pass+1)); actual="已打开 $target_url"
+                            ;;
+                        click*)
+                            local sel; sel=$(echo "$bcmd" | awk '{print $2}')
+                            agent-browser click "$sel" 2>/dev/null && result="✅" pass=$((pass+1)) actual="已点击 $sel" || { result="❌" fail=$((fail+1)); actual="点击失败"; }
+                            ;;
+                        type*)
+                            local args; args=($(echo "$bcmd"))
+                            agent-browser type "${args[1]}" "${args[2]}" 2>/dev/null && result="✅" pass=$((pass+1)) actual="已输入" || { result="❌" fail=$((fail+1)); actual="输入失败"; }
+                            ;;
+                        assert*) ;;
+                        *) result="⏭️"; skip=$((skip+1)); actual="未识别 browser: $bcmd" ;;
+                    esac
+
+                elif echo "$action_clean" | grep -qi '^curl '; then
                     # 安全: 不pipe到bash, 提取URL后直接调用curl (防命令注入)
                     local curl_url; curl_url=$(echo "$action_clean" | grep -oE 'https?://[^ ]+' | head -1)
                     local curl_flags; echo "$action_clean" | grep -q '\-sI' && curl_flags="-sI" || curl_flags="-s"
