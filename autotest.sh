@@ -1,5 +1,5 @@
 #!/bin/bash
-# autotest v1.4 — AutoOps 通用自动化测试引擎
+# autotest v1.6 — AutoOps 通用自动化测试引擎
 # 
 # 用法:
 #   autotest run --project <path> [--scope ct|at|ft|all]
@@ -11,7 +11,7 @@
 
 set -o pipefail
 
-AUTOTEST_VERSION="1.5"
+AUTOTEST_VERSION="1.4"
 CMD="${1:-help}"
 shift 2>/dev/null || true
 
@@ -210,7 +210,7 @@ chain() {
         call)    cast call "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" 2>&1 ;;
         send)
             [ -z "$sk" ] && { echo "ERROR: no private key"; return 1; }
-            local tx; tx=$(cast send "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" --private-key "${DEPLOYER_PRIVATE_KEY:-}" --legacy 2>&1 | sed "s/${DEPLOYER_PRIVATE_KEY//\//\\\\/}/***/g")
+            local tx; tx=$(cast send "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" --private-key "${DEPLOYER_PRIVATE_KEY:-}" $gas_opt --legacy 2>&1 | sed "s/${DEPLOYER_PRIVATE_KEY//\//\\\\/}/***/g")
             echo "$tx"
             echo "$tx" | grep -oP '0x[a-fA-F0-9]{64}' | head -1 | xargs -I{} echo "TX_HASH:{}"
             ;;
@@ -369,7 +369,9 @@ load_wallet_full() {
 run_chain_cmd() {
     # Helper: 过滤命令行中的敏感值(私钥)防止泄露到报告
     safe_filter() { local sk="$1"; shift; "$@" 2>&1 | sed "s/${sk//\//\\/}/\*\*\*/g"; }
-    local cmd="$1" token="$2" rpc="${RPC:-${SEPOLIA_RPC:-}}"
+    local cmd="$1" token="$2" rpc="${RPC:-${SEPOLIA_RPC:-}}" gas_price="${GAS_PRICE_GWEI:-}"
+    local gas_opt=""
+    [ -n "$gas_price" ] && gas_opt="--gas-price ${gas_price}000000000"
     shift 2 2>/dev/null || true
 
     case "$cmd" in
@@ -378,9 +380,15 @@ run_chain_cmd() {
             local sk; sk=$(load_wallet_full "$wallet")
             local addr; addr=$(get_contract "$token")
             [ -z "$addr" ] && addr="$token"  # fallback: 直接当地址
-            local amount_wei; amount_wei=$(echo "$amount * 10^0" | bc 2>/dev/null || echo "$amount")
+            local ctype; ctype=$(get_contract_type "$token" 2>/dev/null || echo "")
             echo "--- chain mint: $token → $wallet ($amount)"
-            cast send "$addr" "mint(address,uint256)" "$(echo "$sk" | xargs -I{} cast wallet address --private-key {} 2>/dev/null || echo "0xunknown")" "$amount_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            if echo "$ctype" | grep -qi 'nft\|erc721'; then
+                # NFT: parameterless mint()
+                cast send "$addr" "mint()" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            else
+                # ERC20/other: mint(address,uint256)
+                cast send "$addr" "mint(address,uint256)" "$(echo "$sk" | xargs -I{} cast wallet address --private-key {} 2>/dev/null || echo "0xunknown")" "${amount:-1}" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            fi
             ;;
         approve)
             local spender="$1" amount="${2:-max}" wallet="$3"
@@ -396,7 +404,7 @@ run_chain_cmd() {
                 amt_wei=$(echo "$amount * 10^$decimals" | bc 2>/dev/null || echo "$amount")
             fi
             echo "--- chain approve: $token → $spender ($amount)"
-            cast send "$addr" "approve(address,uint256)" "$spender_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$addr" "approve(address,uint256)" "$spender_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         transfer)
             local to="$3" wallet="$4" amount="$5"
@@ -408,9 +416,9 @@ run_chain_cmd() {
             local to_addr; to_addr=$(load_wallet_full "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet_full "$to")" 2>/dev/null || echo "$to")
             echo "--- chain transfer: $token → $to ($amount)"
             if [ "$addr" = "$token" ]; then
-                cast send --rpc-url "$rpc" --private-key "$sk" --legacy "$to_addr" --value "$amt_wei" 2>&1 | sed "s/${sk//\//\\\\/}/***/g"
+                cast send --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy "$to_addr" --value "$amt_wei" 2>&1 | sed "s/${sk//\//\\\\/}/***/g"
             else
-                cast send "$addr" "transfer(address,uint256)" "$to_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+                cast send "$addr" "transfer(address,uint256)" "$to_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             fi
             ;;
         transferNFT)
@@ -420,7 +428,7 @@ run_chain_cmd() {
             local to_addr; to_addr=$(load_wallet_full "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet_full "$to")" 2>/dev/null || echo "$to")
             local from_addr; from_addr=$(cast wallet address --private-key "$sk" 2>/dev/null || echo "0xunknown")
             echo "--- chain transferNFT: $token #${tokenId} → $to"
-            cast send "$addr" "safeTransferFrom(address,address,uint256)" "$from_addr" "$to_addr" "$tokenId" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$addr" "safeTransferFrom(address,address,uint256)" "$from_addr" "$to_addr" "$tokenId" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         balanceOf)
             local wallet="$3"
@@ -439,14 +447,14 @@ run_chain_cmd() {
             local amtIn_wei; amtIn_wei=$(echo "$amountIn * 10^$in_dec" | bc 2>/dev/null || echo "$amountIn")
             echo "--- chain swap: $tokenIn → $tokenOut ($amountIn)"
             # 1. approve router
-            cast send "$tIn_addr" "approve(address,uint256)" "$r_addr" "$amtIn_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
+            cast send "$tIn_addr" "approve(address,uint256)" "$r_addr" "$amtIn_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             # 2. 查询最少输出
             local minOut; minOut=$(cast call "$r_addr" "getAmountsOut(uint256,address[])(uint256[])" "$amtIn_wei" "[$tIn_addr,$tOut_addr]" --rpc-url "$rpc" 2>/dev/null | python3 -c "import sys; s=sys.stdin.read(); print(s.split('\n')[0].strip() if s else '1')" 2>/dev/null || echo "1")
             minOut=$(echo "$minOut * 95 / 100" | bc 2>/dev/null || echo "$minOut")  # 5% slippage
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
             # 3. swap
-            cast send "$r_addr" "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amtIn_wei" "$minOut" "[$tIn_addr,$tOut_addr]" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$r_addr" "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amtIn_wei" "$minOut" "[$tIn_addr,$tOut_addr]" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         addLiquidity)
             local router="$1" tokenA="$2" amountA="$3" tokenB="$4" amountB="$5" wallet="$6"
@@ -460,11 +468,11 @@ run_chain_cmd() {
             local amtB_wei; amtB_wei=$(echo "$amountB * 10^$db" | bc 2>/dev/null)
             echo "--- chain addLiquidity: $tokenA ($amountA) + $tokenB ($amountB)"
             # approve both
-            cast send "$tA" "approve(address,uint256)" "$r_addr" "$amtA_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
-            cast send "$tB" "approve(address,uint256)" "$r_addr" "$amtB_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
+            cast send "$tA" "approve(address,uint256)" "$r_addr" "$amtA_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
+            cast send "$tB" "approve(address,uint256)" "$r_addr" "$amtB_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
-            cast send "$r_addr" "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$amtA_wei" "$amtB_wei" "$(echo "$amtA_wei * 95 / 100" | bc)" "$(echo "$amtB_wei * 95 / 100" | bc)" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$r_addr" "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$amtA_wei" "$amtB_wei" "$(echo "$amtA_wei * 95 / 100" | bc)" "$(echo "$amtB_wei * 95 / 100" | bc)" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         removeLiquidity)
             local router="$1" tokenA="$2" tokenB="$3" lpAmount="$4" wallet="$5"
@@ -479,10 +487,10 @@ run_chain_cmd() {
             local lp_wei; lp_wei=$(echo "$lpAmount * 10^$lp_dec" | bc 2>/dev/null || echo "$lpAmount")
             echo "--- chain removeLiquidity: LP ($lpAmount) → $tokenA + $tokenB"
             # approve LP token
-            cast send "$pair_addr" "approve(address,uint256)" "$r_addr" "$lp_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
+            cast send "$pair_addr" "approve(address,uint256)" "$r_addr" "$lp_wei" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
-            cast send "$r_addr" "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$lp_wei" "0" "0" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$r_addr" "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$lp_wei" "0" "0" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         createPool)
             local factory="$1" tokenA="$2" tokenB="$3" wallet="$4"
@@ -491,7 +499,7 @@ run_chain_cmd() {
             local tA; tA=$(get_token_addr "$tokenA"); [ -z "$tA" ] && tA="$tokenA"
             local tB; tB=$(get_token_addr "$tokenB"); [ -z "$tB" ] && tB="$tokenB"
             echo "--- chain createPool: $tokenA + $tokenB"
-            cast send "$f_addr" "createPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
+            cast send "$f_addr" "createPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             # 查回新 pair 地址
             cast call "$f_addr" "getPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" 2>&1
             ;;
@@ -634,7 +642,7 @@ EOF
                     while IFS='|' read -r name addr _; do
                         [ -n "$name" ] && [ -n "$addr" ] && resolved_op=$(echo "$resolved_op" | sed "s/\b${name}\b/${addr}/g")
                     done <<< "$(parse_declarations "$AT_CT_FILE")"
-                    actual=$(cast send $(echo "$resolved_op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g")
+                    actual=$(cast send $(echo "$resolved_op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" $gas_opt --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g")
                     echo "$actual" | grep -q "0x" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
 
                 elif echo "$op" | grep -qiE "^cast code"; then
