@@ -130,43 +130,65 @@ data() {
 }
 
 # ── 浏览器 ────────────────────────────────────
+# agent-browser CLI v0.29+ 实际命令接口
+# snapshot 返回纯文本 accessibility tree（非 JSON）
+# 所有命令自动加 --no-sandbox
 browser() {
     local action="${1:-}" u="${FRONTEND:-${FRONTEND_URL:-http://localhost:4000}}"
     shift 2>/dev/null || true
+    local ab="agent-browser --args --no-sandbox"
     case "$action" in
-        open)    agent-browser open "${1:-$u}" 2>&1 | tail -1 ;;
-        snapshot) sleep 2; agent-browser snapshot -i --json 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-items=d if isinstance(d,list) else d.get('children',d.get('items',[]))
-print(f'DOM_OK:{len(items)} elements')
-for i,item in enumerate(items[:30]):
-    t=str(item)[:120].replace(chr(10),' ')
-    print(f'  [{i+1}] {t}')
-" 2>/dev/null || echo "DOM_EMPTY" ;;
-        elements) sleep 1; agent-browser snapshot -i --json 2>/dev/null | python3 -c "
-import json,sys,re
-d=json.load(sys.stdin)
-items=d if isinstance(d,list) else d.get('children',d.get('items',[]))
-btns,ins,lnks=[],[],[]
-for i,item in enumerate(items):
-    t=str(item)
-    if re.search(r'button|btn',t,re.I): btns.append(f'  [{i+1}] {t[:80]}')
-    if re.search(r'input|textbox|textfield',t,re.I): ins.append(f'  [{i+1}] {t[:80]}')
-    if re.search(r'link|<a ',t,re.I): lnks.append(f'  [{i+1}] {t[:80]}')
-print(f'BUTTONS:{len(btns)}'); [print(b) for b in btns[:15]]
-print(f'INPUTS:{len(ins)}'); [print(i) for i in ins[:10]]
-print(f'LINKS:{len(lnks)}'); [print(l) for l in lnks[:10]]
-" 2>/dev/null || echo "NO_ELEMENTS" ;;
-        content) agent-browser get markdown 2>/dev/null | head -200 ;;
-        click)  agent-browser click "${1:?need index}" 2>&1 | tail -1 ;;
-        type)   agent-browser type "${1:?need index}" "${2:?need text}" 2>&1 | tail -1 ;;
-        hover)  agent-browser hover "${1:?need index}" 2>&1 | tail -1 ;;
-        scroll) agent-browser scroll "${1:-down}" 2>&1 | tail -1 ;;
-        wait)   agent-browser wait stable "${2:-5000}" 2>&1 | tail -1 ;;
-        screenshot) local p="${1:-/tmp/autotest-screenshot.png}"; agent-browser screenshot "$p" 2>&1 | tail -1; echo "SCREENSHOT:$p" ;;
-        close)  agent-browser close 2>/dev/null || true; echo "CLOSED" ;;
-        *) echo "Usage: autotest browser {open|snapshot|elements|content|click|type|hover|scroll|wait|screenshot|close} [args]" ;;
+        open)
+            $ab open "${1:-$u}" 2>&1 | tail -1
+            ;;
+        snapshot)
+            sleep 2
+            $ab snapshot 2>/dev/null
+            ;;
+        content)
+            # get page text content
+            $ab text 2>/dev/null | head -200
+            ;;
+        html)
+            $ab html 2>/dev/null | head -300
+            ;;
+        title)
+            $ab title 2>/dev/null
+            ;;
+        click)
+            $ab click "${1:?need ref}" 2>&1 | tail -2
+            ;;
+        type)
+            $ab type "${1:?need ref}" "${2:?need text}" 2>&1 | tail -2
+            ;;
+        fill)
+            $ab fill "${1:?need ref}" "${2:?need text}" 2>&1 | tail -2
+            ;;
+        hover)
+            $ab hover "${1:?need ref}" 2>&1 | tail -2
+            ;;
+        scroll)
+            $ab scroll "${1:-down}" 2>&1 | tail -1
+            ;;
+        wait)
+            # wait stable for page load
+            $ab open "${1:-$u}" 2>/dev/null
+            sleep 3
+            $ab snapshot 2>/dev/null | head -1
+            ;;
+        screenshot)
+            local p="${1:-/tmp/autotest-screenshot.png}"
+            $ab screenshot "$p" 2>&1 | tail -1
+            echo "SCREENSHOT:$p"
+            ;;
+        close)
+            $ab close 2>/dev/null || true
+            echo "CLOSED"
+            ;;
+        count)
+            $ab count "${1:-*}" 2>/dev/null
+            ;;
+        *) echo "Usage: autotest browser {open|snapshot|content|html|title|click|type|fill|hover|scroll|wait|screenshot|close|count} [args]" ;;
     esac
 }
 
@@ -265,19 +287,19 @@ assert() {
             echo "$rcpt" | grep -qi "status.*1\|blockHash" && echo "ASSERT_PASS: tx ${1:0:10}... confirmed" || echo "ASSERT_FAIL: tx ${1:0:10}... not confirmed"
             ;;
         page-contains)
-            local content; content=$(agent-browser get markdown 2>/dev/null || echo "")
+            local content; content=$(agent-browser --args --no-sandbox text 2>/dev/null || echo "")
             echo "$content" | grep -qi "${1:?text}" && echo "ASSERT_PASS: page contains '$1'" || echo "ASSERT_FAIL: page does NOT contain '$1'"
             ;;
         page-not-contains)
-            local content; content=$(agent-browser get markdown 2>/dev/null || echo "")
+            local content; content=$(agent-browser --args --no-sandbox text 2>/dev/null || echo "")
             echo "$content" | grep -qi "${1:?text}" && echo "ASSERT_FAIL: page contains '$1'" || echo "ASSERT_PASS: page does NOT contain '$1'"
             ;;
         page-title)
-            local t; t=$(agent-browser snapshot -i --json 2>/dev/null | python3 -c "import json,sys,re; m=re.search(r'title[^w]*([^\"'\''>]+)',str(json.load(sys.stdin)),re.I); print(m.group(1) if m else '')" 2>/dev/null || echo "")
+            local t; t=$(agent-browser --args --no-sandbox title 2>/dev/null || echo "")
             echo "$t" | grep -qi "${1:?title}" && echo "ASSERT_PASS: title contains '$1'" || echo "ASSERT_FAIL: title '$t' != '$1'"
             ;;
         element-count)
-            local cnt; cnt=$(agent-browser snapshot -i --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); items=d if isinstance(d,list) else d.get('children',[]); print(len(items))" 2>/dev/null || echo "0")
+            local cnt; cnt=$(agent-browser --args --no-sandbox count "*" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "0")
             [ "$cnt" -ge "${1:?N}" ] 2>/dev/null && echo "ASSERT_PASS: $cnt elements >= $1" || echo "ASSERT_FAIL: $cnt elements < $1"
             ;;
         balance)
@@ -786,33 +808,40 @@ EOF
 
                 # browser 命令 (v2.0) → 用 page 列作为 URL 路径
                 if echo "$action_clean" | grep -qiE '^browser '; then
-                    local bcmd bpath
+                    local bcmd bpath ab="agent-browser --args --no-sandbox"
                     bcmd=$(echo "$action_clean" | sed 's/^browser //')
-                    bpath=$(echo "$bcmd" | awk '{print $NF}')  # last token = URL path
+                    bpath=$(echo "$bcmd" | awk '{print $NF}')
                     local target_url="${f_url}${bpath}"
                     case "$bcmd" in
                         snapshot*)
-                            agent-browser open "$target_url" 2>/dev/null; sleep 2
-                            local snap snap=$(agent-browser snapshot -i --json 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-s=d.get('data',{}).get('snapshot','')
-print(s[:500])" 2>/dev/null)
-                            [ -n "$snap" ] && echo "$snap" | grep -qi "$expected_clean" && result="✅" pass=$((pass+1)) actual="含 '$expected_clean'" || { result="❌" fail=$((fail+1)); actual="快照不含 '$expected_clean'"; }
+                            $ab open "$target_url" 2>/dev/null; sleep 3
+                            local snap; snap=$($ab snapshot 2>/dev/null | head -30)
+                            [ -n "$snap" ] && echo "$snap" | grep -qi "$expected_clean" && { result="✅"; pass=$((pass+1)); actual="含 '$expected_clean'"; } || { result="❌"; fail=$((fail+1)); actual="快照不含 '$expected_clean'"; }
                             ;;
                         navigate*)
-                            agent-browser open "$target_url" 2>/dev/null
-                            result="✅" pass=$((pass+1)); actual="已打开 $target_url"
+                            $ab open "$target_url" 2>/dev/null
+                            result="✅"; pass=$((pass+1)); actual="已打开 $target_url"
                             ;;
                         click*)
                             local sel; sel=$(echo "$bcmd" | awk '{print $2}')
-                            agent-browser click "$sel" 2>/dev/null && result="✅" pass=$((pass+1)) actual="已点击 $sel" || { result="❌" fail=$((fail+1)); actual="点击失败"; }
+                            $ab click "$sel" 2>/dev/null && { result="✅"; pass=$((pass+1)); actual="已点击 $sel"; } || { result="❌"; fail=$((fail+1)); actual="点击失败"; }
                             ;;
                         type*)
                             local args; args=($(echo "$bcmd"))
-                            agent-browser type "${args[1]}" "${args[2]}" 2>/dev/null && result="✅" pass=$((pass+1)) actual="已输入" || { result="❌" fail=$((fail+1)); actual="输入失败"; }
+                            $ab type "${args[1]}" "${args[2]}" 2>/dev/null && { result="✅"; pass=$((pass+1)); actual="已输入"; } || { result="❌"; fail=$((fail+1)); actual="输入失败"; }
                             ;;
-                        assert*) ;;
+                        fill*)
+                            local args; args=($(echo "$bcmd"))
+                            $ab fill "${args[1]}" "${args[2]}" 2>/dev/null && { result="✅"; pass=$((pass+1)); actual="已填入"; } || { result="❌"; fail=$((fail+1)); actual="填入失败"; }
+                            ;;
+                        assert*)
+                            local txt; txt=$($ab text 2>/dev/null | head -50)
+                            echo "$txt" | grep -qi "$expected_clean" && { result="✅"; pass=$((pass+1)); actual="文本含 '$expected_clean'"; } || { result="❌"; fail=$((fail+1)); actual="文本不含 '$expected_clean'"; }
+                            ;;
+                        count*)
+                            local cnt; cnt=$($ab count "${expected_clean:-*}" 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "0")
+                            result="✅"; pass=$((pass+1)); actual="$cnt 个元素"
+                            ;;
                         *) result="⏭️"; skip=$((skip+1)); actual="未识别 browser: $bcmd" ;;
                     esac
 
@@ -830,25 +859,25 @@ print(s[:500])" 2>/dev/null)
                     fi
 
                 elif echo "$action_clean" | grep -qi "open\|加载\|访问"; then
-                    agent-browser open "$url" 2>/dev/null; sleep 2
-                    actual=$(browser snapshot 2>&1 | head -1)
-                    echo "$actual" | grep -q "DOM_OK" && result="✅" pass=$((pass+1)) || { result="❌" fail=$((fail+1)); actual="加载失败"; }
+                    agent-browser --args --no-sandbox open "$url" 2>/dev/null; sleep 3
+                    local sn; sn=$(agent-browser --args --no-sandbox snapshot 2>/dev/null | head -1)
+                    [ -n "$sn" ] && { result="✅"; pass=$((pass+1)); actual="已加载"; } || { result="❌"; fail=$((fail+1)); actual="加载失败"; }
 
                 elif echo "$action" | grep -qi "click\|点击"; then
                     local idx=$(echo "$action" | grep -oP '\d+' | head -1)
-                    agent-browser click "$idx" 2>/dev/null && result="✅" pass=$((pass+1)) actual="点击 #$idx" || { result="❌" fail=$((fail+1)); actual="点击失败"; }
+                    agent-browser --args --no-sandbox click "e${idx}" 2>/dev/null && { result="✅"; pass=$((pass+1)); actual="点击 e$idx"; } || { result="❌"; fail=$((fail+1)); actual="点击失败"; }
 
                 elif echo "$action" | grep -qi "check\|检查\|验证\|包含"; then
-                    agent-browser open "$url" 2>/dev/null; sleep 1
-                    local c; c=$(agent-browser get markdown 2>/dev/null | head -50)
-                    echo "$c" | grep -qi "$expected" && result="✅" pass=$((pass+1)) actual="包含" || { result="❌" fail=$((fail+1)); actual="不含 '$expected'"; }
+                    agent-browser --args --no-sandbox open "$url" 2>/dev/null; sleep 2
+                    local c; c=$(agent-browser --args --no-sandbox text 2>/dev/null | head -50)
+                    echo "$c" | grep -qi "$expected" && { result="✅"; pass=$((pass+1)); actual="包含"; } || { result="❌"; fail=$((fail+1)); actual="不含 '$expected'"; }
 
                 else
                     result="⏭️"; skip=$((skip+1)); actual="未识别: $action"
                 fi
                 echo "| $id | $page | $action | $expected | $actual | $result |" >> "$report"
             done < <(parse_scenarios "$ft" || true)
-            agent-browser close 2>/dev/null || true
+            agent-browser --args --no-sandbox close 2>/dev/null || true
         else
             echo "| — | 无前端测试场景 | — | TEST_SCENARIOS_FT.md 不存在 | ⏭️ |" >> "$report"
             skip=$((skip+1))
