@@ -11,7 +11,7 @@
 
 set -o pipefail
 
-AUTOTEST_VERSION="1.4"
+AUTOTEST_VERSION="1.5"
 CMD="${1:-help}"
 shift 2>/dev/null || true
 
@@ -194,6 +194,8 @@ get_chain_rpc() {
     local chain_name; chain_name=$(parse_chain_config "$file" | head -1 | cut -d'|' -f1)
     [ -z "$chain_name" ] && chain_name="sepolia"
     local rpc; rpc=$(parse_chain_config "$file" | grep "^${chain_name}|" | head -1 | cut -d'|' -f2)
+    # 展开环境变量: $SEPOLIA_RPC → 实际值
+    rpc=$(eval echo "$rpc" 2>/dev/null)
     [ -z "$rpc" ] && rpc="${CHAIN_RPC[$chain_name]:-}"
     [ -z "$rpc" ] && rpc="${SEPOLIA_RPC:-}"
     echo "$rpc"
@@ -333,12 +335,34 @@ get_token_decimals() { local d; d=$(parse_tokens "$AT_CT_FILE" | grep "^${1}|" |
 # 从 .test-wallets.env 读取指定钱包私钥
 load_wallet() {
     local wn="${1:-test-1}"
-    # wallet-1 → TEST_1_SK, wallet-2 → TEST_2_SK
-    local vname=$(echo "$wn" | sed 's/wallet-/TEST_/' | tr 'a-z' 'A-Z')_SK
-    local envf="${TEST_WALLETS_ENV:-${HOME}/.openclaw/workspace/.test-wallets.env}"
-    [ -f "$envf" ] && source "$envf" 2>/dev/null
-    local val="${!vname:-${DEPLOYER_PRIVATE_KEY:-}}"
+    local val
+    # 特殊别名: deployer → DEPLOYER_PRIVATE_KEY, owner → OWNER_PRIVATE_KEY
+    case "$wn" in
+        deployer) val="${DEPLOYER_PRIVATE_KEY:-}" ;;
+        owner) val="${OWNER_PRIVATE_KEY:-}" ;;
+        wallet-*)
+            local vname=$(echo "$wn" | sed 's/wallet-/TEST_/' | tr 'a-z' 'A-Z')_SK
+            local envf="${TEST_WALLETS_ENV:-${HOME}/.openclaw/workspace/.test-wallets.env}"
+            [ -f "$envf" ] && source "$envf" 2>/dev/null
+            val="${!vname:-${DEPLOYER_PRIVATE_KEY:-}}" ;;
+        *) val="${DEPLOYER_PRIVATE_KEY:-}" ;;
+    esac
     [ -n "$val" ] && echo "${val:0:6}...${val: -4}" || echo ""
+}
+
+# 获取钱包完整私钥(用于实际cast发送, 非日志)
+load_wallet_full() {
+    local wn="${1:-test-1}"
+    case "$wn" in
+        deployer) echo "${DEPLOYER_PRIVATE_KEY:-}" ;;
+        owner) echo "${OWNER_PRIVATE_KEY:-}" ;;
+        wallet-*)
+            local vname=$(echo "$wn" | sed 's/wallet-/TEST_/' | tr 'a-z' 'A-Z')_SK
+            local envf="${TEST_WALLETS_ENV:-${HOME}/.openclaw/workspace/.test-wallets.env}"
+            [ -f "$envf" ] && source "$envf" 2>/dev/null
+            echo "${!vname:-${DEPLOYER_PRIVATE_KEY:-}}" ;;
+        *) echo "${DEPLOYER_PRIVATE_KEY:-}" ;;
+    esac
 }
 
 # ── Chain 高级命令分发器 ────────────────────────
@@ -350,18 +374,17 @@ run_chain_cmd() {
 
     case "$cmd" in
         mint)
-            local wallet="${*##* }" amount="${*: -2:1}"
-            wallet="${*##* }"
-            local sk; sk=$(load_wallet "$wallet")
-            local addr; addr=$(get_token_addr "$token")
-            local decimals; decimals=$(get_token_decimals "$token")
-            local amount_wei; amount_wei=$(echo "$amount * 10^$decimals" | bc 2>/dev/null || echo "$amount")
+            local wallet="${1:-deployer}" amount="${2:-1}"
+            local sk; sk=$(load_wallet_full "$wallet")
+            local addr; addr=$(get_contract "$token")
+            [ -z "$addr" ] && addr="$token"  # fallback: 直接当地址
+            local amount_wei; amount_wei=$(echo "$amount * 10^0" | bc 2>/dev/null || echo "$amount")
             echo "--- chain mint: $token → $wallet ($amount)"
             cast send "$addr" "mint(address,uint256)" "$(echo "$sk" | xargs -I{} cast wallet address --private-key {} 2>/dev/null || echo "0xunknown")" "$amount_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         approve)
-            local spender="$3" wallet="$4" amount="${5:-max}"
-            local sk; sk=$(load_wallet "$wallet")
+            local spender="$1" amount="${2:-max}" wallet="$3"
+            local sk; sk=$(load_wallet_full "$wallet")
             local addr; addr=$(get_token_addr "$token")
             local decimals; decimals=$(get_token_decimals "$token")
             local spender_addr; spender_addr=$(get_contract "$spender")
@@ -377,12 +400,12 @@ run_chain_cmd() {
             ;;
         transfer)
             local to="$3" wallet="$4" amount="$5"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local addr; addr=$(get_token_addr "$token")
             local decimals; decimals=$(get_token_decimals "$token")
             [ -z "$addr" ] && addr="$token"  # ETH转账
             local amt_wei; amt_wei=$(echo "$amount * 10^$decimals" | bc 2>/dev/null || echo "$amount")
-            local to_addr; to_addr=$(load_wallet "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet "$to")" 2>/dev/null || echo "$to")
+            local to_addr; to_addr=$(load_wallet_full "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet_full "$to")" 2>/dev/null || echo "$to")
             echo "--- chain transfer: $token → $to ($amount)"
             if [ "$addr" = "$token" ]; then
                 cast send --rpc-url "$rpc" --private-key "$sk" --legacy "$to_addr" --value "$amt_wei" 2>&1 | sed "s/${sk//\//\\\\/}/***/g"
@@ -392,9 +415,9 @@ run_chain_cmd() {
             ;;
         transferNFT)
             local wallet="${*: -1:1}" tokenId="${*: -2:1}" to="${*: -3:1}"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local addr; addr=$(get_token_addr "$token")
-            local to_addr; to_addr=$(load_wallet "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet "$to")" 2>/dev/null || echo "$to")
+            local to_addr; to_addr=$(load_wallet_full "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet_full "$to")" 2>/dev/null || echo "$to")
             local from_addr; from_addr=$(cast wallet address --private-key "$sk" 2>/dev/null || echo "0xunknown")
             echo "--- chain transferNFT: $token #${tokenId} → $to"
             cast send "$addr" "safeTransferFrom(address,address,uint256)" "$from_addr" "$to_addr" "$tokenId" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
@@ -402,13 +425,13 @@ run_chain_cmd() {
         balanceOf)
             local wallet="$3"
             local addr; addr=$(get_token_addr "$token")
-            local wallet_addr; wallet_addr=$(load_wallet "$wallet" 2>/dev/null && cast wallet address --private-key "$(load_wallet "$wallet")" 2>/dev/null || echo "$wallet")
+            local wallet_addr; wallet_addr=$(load_wallet_full "$wallet" 2>/dev/null && cast wallet address --private-key "$(load_wallet_full "$wallet")" 2>/dev/null || echo "$wallet")
             echo "--- chain balanceOf: $token → $wallet"
             cast call "$addr" "balanceOf(address)(uint256)" "$wallet_addr" --rpc-url "$rpc" 2>&1
             ;;
         swap)
             local router="$1" tokenIn="$2" tokenOut="$3" amountIn="$4" wallet="$5"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local r_addr; r_addr=$(get_contract "$router"); [ -z "$r_addr" ] && r_addr="$router"
             local tIn_addr; tIn_addr=$(get_token_addr "$tokenIn"); [ -z "$tIn_addr" ] && tIn_addr="$tokenIn"
             local tOut_addr; tOut_addr=$(get_token_addr "$tokenOut"); [ -z "$tOut_addr" ] && tOut_addr="$tokenOut"
@@ -427,7 +450,7 @@ run_chain_cmd() {
             ;;
         addLiquidity)
             local router="$1" tokenA="$2" amountA="$3" tokenB="$4" amountB="$5" wallet="$6"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local r_addr; r_addr=$(get_contract "$router"); [ -z "$r_addr" ] && r_addr="$router"
             local tA; tA=$(get_token_addr "$tokenA"); [ -z "$tA" ] && tA="$tokenA"
             local tB; tB=$(get_token_addr "$tokenB"); [ -z "$tB" ] && tB="$tokenB"
@@ -445,7 +468,7 @@ run_chain_cmd() {
             ;;
         removeLiquidity)
             local router="$1" tokenA="$2" tokenB="$3" lpAmount="$4" wallet="$5"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local r_addr; r_addr=$(get_contract "$router"); [ -z "$r_addr" ] && r_addr="$router"
             local tA; tA=$(get_token_addr "$tokenA"); [ -z "$tA" ] && tA="$tokenA"
             local tB; tB=$(get_token_addr "$tokenB"); [ -z "$tB" ] && tB="$tokenB"
@@ -463,7 +486,7 @@ run_chain_cmd() {
             ;;
         createPool)
             local factory="$1" tokenA="$2" tokenB="$3" wallet="$4"
-            local sk; sk=$(load_wallet "$wallet")
+            local sk; sk=$(load_wallet_full "$wallet")
             local f_addr; f_addr=$(get_contract "$factory"); [ -z "$f_addr" ] && f_addr="$factory"
             local tA; tA=$(get_token_addr "$tokenA"); [ -z "$tA" ] && tA="$tokenA"
             local tB; tB=$(get_token_addr "$tokenB"); [ -z "$tB" ] && tB="$tokenB"
@@ -592,16 +615,34 @@ EOF
                     cd - >/dev/null 2>&1 || true
 
                 elif echo "$op" | grep -qiE "^cast call"; then
-                    actual=$(cast call $(echo "$op" | sed 's/^cast call //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" 2>&1 | head -1)
-                    echo "$actual" | grep -qi "$expected" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    # 合约别名替换: ContraNFT → 0xba204d...
+                    local resolved_op="$op"
+                    while IFS='|' read -r name addr _; do
+                        [ -n "$name" ] && [ -n "$addr" ] && resolved_op=$(echo "$resolved_op" | sed "s/\b${name}\b/${addr}/g")
+                    done <<< "$(parse_declarations "$AT_CT_FILE")"
+                    actual=$(cast call $(echo "$resolved_op" | sed 's/^cast call //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" 2>&1 | head -1)
+                    if echo "$expected" | grep -qiE '^> 0'; then
+                        local just_num; just_num=$(echo "$actual" | grep -oE '[0-9]+' | head -1)
+                        [ -n "$just_num" ] && [ "$just_num" != "0" ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    else
+                        echo "$actual" | grep -qi "$expected" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    fi
 
                 elif echo "$op" | grep -qiE "^cast send"; then
                     local sk="${DEPLOYER_PRIVATE_KEY:-}"
-                    actual=$(cast send $(echo "$op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g")
+                    local resolved_op="$op"
+                    while IFS='|' read -r name addr _; do
+                        [ -n "$name" ] && [ -n "$addr" ] && resolved_op=$(echo "$resolved_op" | sed "s/\b${name}\b/${addr}/g")
+                    done <<< "$(parse_declarations "$AT_CT_FILE")"
+                    actual=$(cast send $(echo "$resolved_op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g")
                     echo "$actual" | grep -q "0x" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
 
                 elif echo "$op" | grep -qiE "^cast code"; then
-                    actual=$(cast code $(echo "$op" | sed 's/^cast code //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" 2>&1 | head -3)
+                    local resolved_op="$op"
+                    while IFS='|' read -r name addr _; do
+                        [ -n "$name" ] && [ -n "$addr" ] && resolved_op=$(echo "$resolved_op" | sed "s/\b${name}\b/${addr}/g")
+                    done <<< "$(parse_declarations "$AT_CT_FILE")"
+                    actual=$(cast code $(echo "$resolved_op" | sed 's/^cast code //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" 2>&1 | head -3)
                     if echo "$expected" | grep -qi "非空\|not empty"; then
                         echo "$actual" | grep -qE '0x[0-9a-fA-F]{2,}' && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
                     else
