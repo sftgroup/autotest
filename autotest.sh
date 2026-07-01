@@ -1,5 +1,5 @@
 #!/bin/bash
-# autotest v1.3 — AutoOps 通用自动化测试引擎
+# autotest v1.4 — AutoOps 通用自动化测试引擎
 # 
 # 用法:
 #   autotest run --project <path> [--scope ct|at|ft|all]
@@ -9,9 +9,9 @@
 # Chain 高级命令 (v1.2): mint / approve / transfer / swap / addLiquidity / removeLiquidity / createPool / transferNFT
 # 场景文件需声明 ## contracts 和 ## tokens 段，然后用 chain 语义化命令
 
-#set -euo pipefail
+set -o pipefail
 
-AUTOTEST_VERSION="1.3"
+AUTOTEST_VERSION="1.4"
 CMD="${1:-help}"
 shift 2>/dev/null || true
 
@@ -164,7 +164,7 @@ print(f'LINKS:{len(lnks)}'); [print(l) for l in lnks[:10]]
         hover)  agent-browser hover "${1:?need index}" 2>&1 | tail -1 ;;
         scroll) agent-browser scroll "${1:-down}" 2>&1 | tail -1 ;;
         wait)   agent-browser wait stable "${2:-5000}" 2>&1 | tail -1 ;;
-        screenshot) local p="${1:/tmp/autotest-screenshot.png}"; agent-browser screenshot "$p" 2>&1 | tail -1; echo "SCREENSHOT:$p" ;;
+        screenshot) local p="${1:-/tmp/autotest-screenshot.png}"; agent-browser screenshot "$p" 2>&1 | tail -1; echo "SCREENSHOT:$p" ;;
         close)  agent-browser close 2>/dev/null || true; echo "CLOSED" ;;
         *) echo "Usage: autotest browser {open|snapshot|elements|content|click|type|hover|scroll|wait|screenshot|close} [args]" ;;
     esac
@@ -208,7 +208,7 @@ chain() {
         call)    cast call "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" 2>&1 ;;
         send)
             [ -z "$sk" ] && { echo "ERROR: no private key"; return 1; }
-            local tx; tx=$(cast send "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" --private-key "***" --legacy 2>&1)
+            local tx; tx=$(cast send "${1:?addr}" "${2:?sig}" ${3:+"$3"} --rpc-url "$r" --private-key "${DEPLOYER_PRIVATE_KEY:-}" --legacy 2>&1 | sed "s/${DEPLOYER_PRIVATE_KEY//\//\\\\/}/***/g")
             echo "$tx"
             echo "$tx" | grep -oP '0x[a-fA-F0-9]{64}' | head -1 | xargs -I{} echo "TX_HASH:{}"
             ;;
@@ -342,6 +342,8 @@ load_wallet() {
 
 # ── Chain 高级命令分发器 ────────────────────────
 run_chain_cmd() {
+    # Helper: 过滤命令行中的敏感值(私钥)防止泄露到报告
+    safe_filter() { local sk="$1"; shift; "$@" 2>&1 | sed "s/${sk//\//\\/}/\*\*\*/g"; }
     local cmd="$1" token="$2" rpc="${RPC:-${SEPOLIA_RPC:-}}"
     shift 2 2>/dev/null || true
 
@@ -354,7 +356,7 @@ run_chain_cmd() {
             local decimals; decimals=$(get_token_decimals "$token")
             local amount_wei; amount_wei=$(echo "$amount * 10^$decimals" | bc 2>/dev/null || echo "$amount")
             echo "--- chain mint: $token → $wallet ($amount)"
-            cast send "$addr" "mint(address,uint256)" "$(echo "$sk" | xargs -I{} cast wallet address --private-key {} 2>/dev/null || echo "0xunknown")" "$amount_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$addr" "mint(address,uint256)" "$(echo "$sk" | xargs -I{} cast wallet address --private-key {} 2>/dev/null || echo "0xunknown")" "$amount_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         approve)
             local spender="$3" wallet="$4" amount="${5:-max}"
@@ -370,7 +372,7 @@ run_chain_cmd() {
                 amt_wei=$(echo "$amount * 10^$decimals" | bc 2>/dev/null || echo "$amount")
             fi
             echo "--- chain approve: $token → $spender ($amount)"
-            cast send "$addr" "approve(address,uint256)" "$spender_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$addr" "approve(address,uint256)" "$spender_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         transfer)
             local to="$3" wallet="$4" amount="$5"
@@ -382,9 +384,9 @@ run_chain_cmd() {
             local to_addr; to_addr=$(load_wallet "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet "$to")" 2>/dev/null || echo "$to")
             echo "--- chain transfer: $token → $to ($amount)"
             if [ "$addr" = "$token" ]; then
-                cast send --rpc-url "$rpc" --private-key "$sk" --legacy "$to_addr" --value "$amt_wei" 2>&1
+                cast send --rpc-url "$rpc" --private-key "$sk" --legacy "$to_addr" --value "$amt_wei" 2>&1 | sed "s/${sk//\//\\\\/}/***/g"
             else
-                cast send "$addr" "transfer(address,uint256)" "$to_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+                cast send "$addr" "transfer(address,uint256)" "$to_addr" "$amt_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             fi
             ;;
         transferNFT)
@@ -394,7 +396,7 @@ run_chain_cmd() {
             local to_addr; to_addr=$(load_wallet "$to" 2>/dev/null && cast wallet address --private-key "$(load_wallet "$to")" 2>/dev/null || echo "$to")
             local from_addr; from_addr=$(cast wallet address --private-key "$sk" 2>/dev/null || echo "0xunknown")
             echo "--- chain transferNFT: $token #${tokenId} → $to"
-            cast send "$addr" "safeTransferFrom(address,address,uint256)" "$from_addr" "$to_addr" "$tokenId" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$addr" "safeTransferFrom(address,address,uint256)" "$from_addr" "$to_addr" "$tokenId" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         balanceOf)
             local wallet="$3"
@@ -413,14 +415,14 @@ run_chain_cmd() {
             local amtIn_wei; amtIn_wei=$(echo "$amountIn * 10^$in_dec" | bc 2>/dev/null || echo "$amountIn")
             echo "--- chain swap: $tokenIn → $tokenOut ($amountIn)"
             # 1. approve router
-            cast send "$tIn_addr" "approve(address,uint256)" "$r_addr" "$amtIn_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | tail -1
+            cast send "$tIn_addr" "approve(address,uint256)" "$r_addr" "$amtIn_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             # 2. 查询最少输出
             local minOut; minOut=$(cast call "$r_addr" "getAmountsOut(uint256,address[])(uint256[])" "$amtIn_wei" "[$tIn_addr,$tOut_addr]" --rpc-url "$rpc" 2>/dev/null | python3 -c "import sys; s=sys.stdin.read(); print(s.split('\n')[0].strip() if s else '1')" 2>/dev/null || echo "1")
             minOut=$(echo "$minOut * 95 / 100" | bc 2>/dev/null || echo "$minOut")  # 5% slippage
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
             # 3. swap
-            cast send "$r_addr" "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amtIn_wei" "$minOut" "[$tIn_addr,$tOut_addr]" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$r_addr" "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amtIn_wei" "$minOut" "[$tIn_addr,$tOut_addr]" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         addLiquidity)
             local router="$1" tokenA="$2" amountA="$3" tokenB="$4" amountB="$5" wallet="$6"
@@ -434,11 +436,11 @@ run_chain_cmd() {
             local amtB_wei; amtB_wei=$(echo "$amountB * 10^$db" | bc 2>/dev/null)
             echo "--- chain addLiquidity: $tokenA ($amountA) + $tokenB ($amountB)"
             # approve both
-            cast send "$tA" "approve(address,uint256)" "$r_addr" "$amtA_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | tail -1
-            cast send "$tB" "approve(address,uint256)" "$r_addr" "$amtB_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | tail -1
+            cast send "$tA" "approve(address,uint256)" "$r_addr" "$amtA_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
+            cast send "$tB" "approve(address,uint256)" "$r_addr" "$amtB_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
-            cast send "$r_addr" "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$amtA_wei" "$amtB_wei" "$(echo "$amtA_wei * 95 / 100" | bc)" "$(echo "$amtB_wei * 95 / 100" | bc)" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$r_addr" "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$amtA_wei" "$amtB_wei" "$(echo "$amtA_wei * 95 / 100" | bc)" "$(echo "$amtB_wei * 95 / 100" | bc)" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         removeLiquidity)
             local router="$1" tokenA="$2" tokenB="$3" lpAmount="$4" wallet="$5"
@@ -453,10 +455,10 @@ run_chain_cmd() {
             local lp_wei; lp_wei=$(echo "$lpAmount * 10^$lp_dec" | bc 2>/dev/null || echo "$lpAmount")
             echo "--- chain removeLiquidity: LP ($lpAmount) → $tokenA + $tokenB"
             # approve LP token
-            cast send "$pair_addr" "approve(address,uint256)" "$r_addr" "$lp_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | tail -1
+            cast send "$pair_addr" "approve(address,uint256)" "$r_addr" "$lp_wei" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g" | tail -1
             local deadline; deadline=$(($(date +%s) + 600))
             local me; me=$(cast wallet address --private-key "$sk" 2>/dev/null)
-            cast send "$r_addr" "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$lp_wei" "0" "0" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$r_addr" "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)" "$tA" "$tB" "$lp_wei" "0" "0" "$me" "$deadline" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             ;;
         createPool)
             local factory="$1" tokenA="$2" tokenB="$3" wallet="$4"
@@ -465,7 +467,7 @@ run_chain_cmd() {
             local tA; tA=$(get_token_addr "$tokenA"); [ -z "$tA" ] && tA="$tokenA"
             local tB; tB=$(get_token_addr "$tokenB"); [ -z "$tB" ] && tB="$tokenB"
             echo "--- chain createPool: $tokenA + $tokenB"
-            cast send "$f_addr" "createPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1
+            cast send "$f_addr" "createPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g"
             # 查回新 pair 地址
             cast call "$f_addr" "getPair(address,address)(address)" "$tA" "$tB" --rpc-url "$rpc" 2>&1
             ;;
@@ -552,11 +554,21 @@ EOF
                     local pass_line; pass_line=$(echo "$actual" | grep -c 'blockHash\|transactionHash' 2>/dev/null || true)
                     if echo "$expected" | grep -qE '^[0-9]+$'; then
                         echo "$actual" | tr -d '\n' | grep -qE "[^0-9]*${expected}[^0-9]*" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
-                    elif echo "$expected" | grep -qiE '^(success|LP > 0|WETH > 0|USDC > 0|> 0|=.*)'; then
+                    elif echo "$expected" | grep -qiE '^(success|=.*)'; then
                         [ "$pass_line" -gt 0 ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
-                    elif echo "$expected" | grep -qiE '^(true|false)$'; then
+                    elif echo "$expected" | grep -qiE '> 0'; then
+                        # 通用余额/数量 > 0 断言
+                        local just_num; just_num=$(echo "$actual" | grep -oE '[0-9]+(\.?[0-9]+)?' | head -1)
+                        [ -n "$just_num" ] && [ "$just_num" != "0" ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    elif echo "$expected" | grep -qi '^true$'; then
                         [ "$pass_line" -gt 0 ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    elif echo "$expected" | grep -qi '^false$'; then
+                        [ "$pass_line" -eq 0 ] 2>/dev/null && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
+                    elif echo "$expected" | grep -qE '^0x[0-9a-fA-F]{40}$'; then
+                        # 精确 42 字符地址匹配 (0x + 40 hex)
+                        echo "$actual" | grep -qw "${expected}" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
                     elif echo "$expected" | grep -qE '^0x'; then
+                        # 非完整地址的 hex 预期 → 大小写不敏感匹配
                         echo "$actual" | grep -qi "${expected}" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
                     else
                         echo "$actual" | grep -qi "$expected" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
@@ -582,7 +594,7 @@ EOF
 
                 elif echo "$op" | grep -qiE "^cast send"; then
                     local sk="${DEPLOYER_PRIVATE_KEY:-}"
-                    actual=$(cast send $(echo "$op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" --legacy 2>&1)
+                    actual=$(cast send $(echo "$op" | sed 's/^cast send //') --rpc-url "${RPC:-${SEPOLIA_RPC:-}}" --private-key "$sk" --legacy 2>&1 | sed "s/${sk//\//\\/}/***/g")
                     echo "$actual" | grep -q "0x" && { result="✅"; pass=$((pass+1)); } || { result="❌"; fail=$((fail+1)); $is_blocking && blocking_fail=1; }
 
                 elif echo "$op" | grep -qiE "^cast code"; then
@@ -626,18 +638,18 @@ EOF
                 local actual_code="" result=""
                 # Case 1: endpoint is a full curl command (e.g. curl -s http://HOST/api/stats)
                 if echo "$endpoint_clean" | grep -qi '^curl '; then
-                    # Execute curl, timeout-protected, check body for expected text
-                    local curl_out; curl_out=$(echo "$endpoint_clean" | sed 's/^curl /curl --connect-timeout 5 --max-time 10 /' | bash 2>/dev/null || echo "CURL_FAIL")
-                    # Simple: if expected looks like status code, check curl -sI; otherwise grep body
+                    # 安全: 不pipe到bash, 提取URL后直接调用curl (防命令注入)
+                    local curl_url flags curl_flags=""
+                    # Extract URL from curl command (last argument-like token starting with http)
+                    curl_url=$(echo "$endpoint_clean" | grep -oE 'https?://[^ ]+' | head -1)
+                    # Extract flags: -sI/-s/-i/-I
+                    echo "$endpoint_clean" | grep -q '\-sI' && curl_flags="-sI" || curl_flags="-s"
+                    local curl_out
+                    curl_out=$(curl ${curl_flags} --connect-timeout 5 --max-time 10 "$curl_url" 2>/dev/null || echo "CURL_FAIL")
+                    # Simple: if expected looks like status code, check HTTP code; otherwise grep body
                     if echo "$expected_clean" | grep -qE '^[0-9]{3}$'; then
                         local st_code
-                        # Extract URL from curl command
-                        local curl_url; curl_url=$(echo "$endpoint_clean" | sed 's/^curl[ -]*sI[ -]*//' | awk '{print $1}')
-                        if echo "$endpoint_clean" | grep -q '\-sI'; then
-                            st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null || echo "000")
-                        else
-                            st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null || echo "000")
-                        fi
+                        curl ${curl_flags} -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null && st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null) || st_code="000"
                         [ "$st_code" = "$expected_clean" ] && result="✅" pass=$((pass+1)) actual_code="HTTP ${st_code}" || { result="❌" fail=$((fail+1)); actual_code="HTTP ${st_code}"; }
                     else
                         echo "$curl_out" | grep -qi "$expected_clean" && result="✅" pass=$((pass+1)) actual_code="匹配" || { result="❌" fail=$((fail+1)); actual_code="不匹配"; }
@@ -680,15 +692,13 @@ EOF
 
                 # curl command detection (before browser checks)
                 if echo "$action_clean" | grep -qi '^curl '; then
-                    local curl_out; curl_out=$(echo "$action_clean" | sed 's/^curl /curl --connect-timeout 5 --max-time 10 /' | bash 2>/dev/null || echo "CURL_FAIL")
+                    # 安全: 不pipe到bash, 提取URL后直接调用curl (防命令注入)
+                    local curl_url; curl_url=$(echo "$action_clean" | grep -oE 'https?://[^ ]+' | head -1)
+                    local curl_flags; echo "$action_clean" | grep -q '\-sI' && curl_flags="-sI" || curl_flags="-s"
+                    local curl_out; curl_out=$(curl ${curl_flags} --connect-timeout 5 --max-time 10 "$curl_url" 2>/dev/null || echo "CURL_FAIL")
                     if echo "$expected_clean" | grep -qE '^[0-9]{3}$'; then
                         local st_code
-                        local curl_url; curl_url=$(echo "$action_clean" | sed 's/^curl[ -]*sI[ -]*//' | awk '{print $1}')
-                        if echo "$action_clean" | grep -q '\-sI'; then
-                            st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null || echo "000")
-                        else
-                            st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null || echo "000")
-                        fi
+                        curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null && st_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$curl_url" 2>/dev/null) || st_code="000"
                         [ "$st_code" = "$expected_clean" ] && result="✅" pass=$((pass+1)) actual="HTTP $st_code" || { result="❌" fail=$((fail+1)); actual="HTTP $st_code"; }
                     else
                         echo "$curl_out" | grep -qi "$expected_clean" && result="✅" pass=$((pass+1)) actual="匹配" || { result="❌" fail=$((fail+1)); actual="不匹配"; }
@@ -727,8 +737,10 @@ EOF
     echo "## 历史对比" >> "$report"
     echo "" >> "$report"
     if [ -f "$prev_report" ]; then
-        local prev_pass; prev_pass=$(grep -oP '(?<=\| )\d+(?= \| \d+ \| \d+ \| \d+ \|)' "$prev_report" | head -1 || echo "0")
-        local prev_fail; prev_fail=$(grep -oP '(?<=\| \d+ \| )\d+(?= \| \d+ \| \d+ \|)' "$prev_report" | head -1 || echo "0")
+        # Extract pass/fail from summary row: | N | N | N | N | N% |
+        # grep for the row containing "通过" and "失败" then extract 2nd and 3rd numeric columns
+        local prev_pass; prev_pass=$(grep '|.*✅.*|.*❌.*|.*⏭️' "$prev_report" | head -1 | awk -F'|' '{print $2}' | grep -oE '[0-9]+' | head -1 || echo "0")
+        local prev_fail; prev_fail=$(grep '|.*✅.*|.*❌.*|.*⏭️' "$prev_report" | head -1 | awk -F'|' '{print $3}' | grep -oE '[0-9]+' | head -1 || echo "0")
         local prev_total=$((prev_pass + prev_fail))
         local prev_rate=0
         [ "$prev_total" -gt 0 ] && prev_rate=$(echo "scale=1; $prev_pass * 100 / $prev_total" | bc 2>/dev/null || echo "0")
