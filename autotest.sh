@@ -11,7 +11,7 @@
 
 set -o pipefail
 
-AUTOTEST_VERSION="1.4"
+AUTOTEST_VERSION="2.0"
 CMD="${1:-help}"
 shift 2>/dev/null || true
 
@@ -366,10 +366,22 @@ parse_declarations_env() {
 
 expand_vars() {
     # 展开 ${FRONTEND} ${RELAY_API} 等模板变量
+    # 优先级: 当前文件 declarations → CT文件 declarations → 环境变量/CLI参数
     local text="$1" file="$2"
     local frontend relay_api
     frontend=$(parse_declarations_env "$file" | grep '^frontend|' | cut -d'|' -f2)
     relay_api=$(parse_declarations_env "$file" | grep '^relay_api|' | cut -d'|' -f2)
+    # fallback: 从 CT 文件的 ## declarations 读
+    local ct_f=""
+    [ -n "${PROJECT_PATH:-}" ] && ct_f="${PROJECT_PATH}/test-reports/TEST_SCENARIOS_CT.md"
+    [ -z "$ct_f" ] && [ -n "${report_dir:-}" ] && ct_f="${report_dir}/TEST_SCENARIOS_CT.md"
+    if [ -z "$frontend" ] && [ -f "$ct_f" ]; then
+        frontend=$(parse_declarations_env "$ct_f" | grep '^frontend|' | cut -d'|' -f2)
+    fi
+    if [ -z "$relay_api" ] && [ -f "$ct_f" ]; then
+        relay_api=$(parse_declarations_env "$ct_f" | grep '^relay_api|' | cut -d'|' -f2)
+    fi
+    # fallback: 环境变量/CLI参数
     [ -z "$frontend" ] && frontend="${FRONTEND:-${FRONTEND_URL:-}}"
     [ -z "$relay_api" ] && relay_api="$frontend/api"
     local result="$text"
