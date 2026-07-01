@@ -4,41 +4,9 @@
 
 ---
 
-## ⚠️ OpenClaw Sandbox 网络隔离
-
-**OpenClaw 子 Agent（tester 等）运行在 Docker sandbox 中，默认 `network="none"`。**
-这是 OpenClaw 的安全设计（非 bug），子 Agent sandbox 无法直接访问外网 URL 或测试服务器。
-
-**架构师 spawn tester 前，必须先建 SSH 隧道：**
-
-```bash
-# 前端穿透：宿主机 localhost:5000 → 测试服务器前端
-ssh -fN -L 5000:localhost:3080 root@43.159.39.85
-```
-
-**场景文件中的 `## declarations` 使用隧道地址（localhost），不是真实 IP：**
-
-```markdown
-## declarations
-| 键 | 值 |
-|----|----|
-| frontend | http://localhost:5000 |
-| relay_api | http://localhost:5000/api |
-```
-
-> 链上 RPC（`cast call`/`cast send`）不受影响 —— 它们直接访问公网 RPC 节点，不走隧道。
-
----
-
-## 架构师快速上手 (4 步)
+## 架构师快速上手 (3 步)
 
 拿到一个新项目后，按以下流程编写场景文档：
-
-### Step 0: 建 SSH 隧道（给 tester 用）
-
-```bash
-ssh -fN -L 5000:localhost:3080 root@43.159.39.85
-```
 
 ### Step 1: 填写声明
 
@@ -49,7 +17,7 @@ ssh -fN -L 5000:localhost:3080 root@43.159.39.85
 | 链名 | RPC | gas_price_gwei |
 | sepolia | $SEPOLIA_RPC | 100 |
 
-## declarations (前端在哪? API 在哪?)
+## declarations (前端地址 — 必须写外部可达的真实地址)
 | 键 | 值 |
 | frontend | http://43.159.39.85:3080 |
 | relay_api | http://43.159.39.85:3080/api |
@@ -84,6 +52,31 @@ ssh -fN -L 5000:localhost:3080 root@43.159.39.85
 source ~/.openclaw/workspace/.sepolia.env
 autotest run --project {项目路径} --scope all
 ```
+
+---
+
+## ⚠️ 注意事项：OpenClaw Sandbox 网络隔离
+
+**OpenClaw 子 Agent（tester 等）运行在 Docker sandbox 中，默认 `network="none"`。**
+这是 OpenClaw 的安全设计（非 bug），子 Agent sandbox 无法直接访问外网。
+
+**架构师 spawn tester 前，必须先建 SSH 隧道：**
+
+```bash
+# 宿主机 localhost:5000 → 测试服务器前端 :3080
+ssh -fN -L 5000:localhost:3080 root@43.159.39.85
+```
+
+**给 tester 的场景文件用隧道地址（架构师 spawn 时替换 declarations 段）：**
+
+```markdown
+## declarations
+| 键 | 值 |
+| frontend | http://localhost:5000 |
+| relay_api | http://localhost:5000/api |
+```
+
+> 链上 RPC（`cast call`/`cast send`）不受影响 —— 它们直接访问公网 RPC 节点，不走隧道。
 
 ---
 
@@ -137,11 +130,10 @@ autotest run --project {项目路径} --scope all
 |----|-----|
 | frontend | http://43.159.39.85:3080 |
 | relay_api | http://43.159.39.85:3080/api |
-| env_file | ~/.openclaw/workspace/.sepolia.env |
 ```
 
-- `frontend`: autotest 自动用于 AT/FT 段的 HTTP 请求基础路径
-- `relay_api`: Relay API 地址（可选，覆盖 frontend）
+- **frontend 必须写外部可达的真实地址**（不是 localhost），让 tester 拿到就能 curl/browser 访问
+- `relay_api`: Relay API 地址（可选，默认 = frontend + /api）
 - autotest 解析后不再需要 `--frontend` 参数
 
 ### ## contracts — 合约声明

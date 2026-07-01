@@ -23,7 +23,7 @@ ssh -fN -L 5000:localhost:3080 root@43.159.39.85
 # ${FRONTEND} = http://localhost:5000
 ```
 
-子 Agent 场景文件中的 `## declarations` 应使用隧道地址：
+子 Agent 场景文件中的 `## declarations` 应使用隧道地址（架构师 spawn 时替换）：
 
 ```markdown
 ## declarations
