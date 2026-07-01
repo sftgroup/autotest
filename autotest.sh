@@ -337,7 +337,8 @@ load_wallet() {
     local vname=$(echo "$wn" | sed 's/wallet-/TEST_/' | tr 'a-z' 'A-Z')_SK
     local envf="${TEST_WALLETS_ENV:-${HOME}/.openclaw/workspace/.test-wallets.env}"
     [ -f "$envf" ] && source "$envf" 2>/dev/null
-    echo "${!vname:-${DEPLOYER_PRIVATE_KEY:-}}"
+    local val="${!vname:-${DEPLOYER_PRIVATE_KEY:-}}"
+    [ -n "$val" ] && echo "${val:0:6}...${val: -4}" || echo ""
 }
 
 # ── Chain 高级命令分发器 ────────────────────────
@@ -578,14 +579,16 @@ EOF
 
                 elif echo "$op" | grep -qi "forge test"; then
                     cd "${PROJECT}/contracts" 2>/dev/null || cd "$PROJECT" 2>/dev/null || true
-                    if forge test -vvv 2>&1 >/tmp/at_ct_$$.log; then
-                        actual="$(grep -c 'test.*ok' /tmp/at_ct_$$.log 2>/dev/null || echo 0)条通过"
+                    local tmpf; tmpf=$(mktemp /tmp/at_ct_XXXXXX.log)
+                    if forge test -vvv 2>&1 >"$tmpf"; then
+                        actual="$(grep -c 'test.*ok' "$tmpf" 2>/dev/null || echo 0)条通过"
                         result="✅"; pass=$((pass+1))
                     else
-                        actual="$(grep 'FAIL' /tmp/at_ct_$$.log | head -1 | xargs)"
+                        actual="$(grep 'FAIL' "$tmpf" | head -1 | xargs)"
                         result="❌"; fail=$((fail+1))
                         $is_blocking && blocking_fail=1
                     fi
+                    rm -f "$tmpf"
                     cd - >/dev/null 2>&1 || true
 
                 elif echo "$op" | grep -qiE "^cast call"; then
